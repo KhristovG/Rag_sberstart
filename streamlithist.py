@@ -29,10 +29,15 @@ load_dotenv()
 # Создаём модель сбер
 # @st.cache_resource
 # def get_llm():
-#     return GigaChat(auth_url='https://sm-auth-sd.prom-88-89-apps.ocp-geo.ocp.sigma.sbrf.ru/api/v2/oauth', credentials=os.getenv('credentials'), verify_ssl_certs=False)
+#     return GigaChat(auth_url='https://sm-auth-sd.prom-88-89-apps.ocp-geo.ocp.sigma.sbrf.ru/api/v2/oauth',
+#     credentials=os.getenv('credentials'),
+#     verify_ssl_certs=False)
+
+# функции в отдельный файл переносить не стал, т.к. кэшстримлита становится муторным.
+# Почти во всех функциях грузятся эмбеддинги\ллм.
+# Создаём модель не сбер
 
 
-#Создаём модель не сбер
 @st.cache_resource
 def get_llm():
     return GigaChat(credentials=os.getenv('credentials'), verify_ssl_certs=False)
@@ -107,7 +112,7 @@ def create_conversational_rag_chain(retriever):
 
     rag_chain = create_retrieval_chain(history_aware_retriever, question_answer_chain)
 
-    #история чата
+    # история чата
     store = {}
 
     def get_session_history(session_id: str) -> BaseChatMessageHistory:
@@ -153,11 +158,12 @@ def extract_text_from_pdf(pdf_files, session_id):
     return retriever_st
 
 
+# загрузка и подготовка текста с arxiv
 def extract_text_from_arxiv(query):
     retriever = ArxivRetriever(
-    load_max_docs=2,
-    get_ful_documents=True,
-    top_k_results=4)
+        load_max_docs=2,
+        get_ful_documents=True,
+        top_k_results=4)
     docs_arxiv = retriever.invoke(query)
     docs = []
     meta = []
@@ -187,14 +193,17 @@ def extract_text_from_arxiv(query):
     return retriever_arxiv, meta
 
 
+# предзагрузка бд, очевидно не будет работать без самой бд - нужно создать.
+# Функционал ответа по файлам и архиву работает без этой функции
 # @st.cache_resource
 def prep_bd(session_id):
-    file_Path = 'C:\Work\Rag\DB_merged'
-    vector_store_loaded = FAISS.load_local(folder_path=file_Path, embeddings=get_embeddings(), allow_dangerous_deserialization= True)
+    file_path = 'C:\Work\Rag\DB_merged'
+    vector_store_loaded = FAISS.load_local(folder_path=file_path, embeddings=get_embeddings(), allow_dangerous_deserialization= True)
     loaded_retriever = vector_store_loaded.as_retriever(search_kwargs={'k': 3}, search_type="mmr")
     return loaded_retriever
 
 
+# помощь с перефразировкой вопросов
 def rephrase(user_input):
     llm = get_llm()
     prompt_template = PromptTemplate(
@@ -207,6 +216,7 @@ def rephrase(user_input):
     return resp['text']
 
 
+# главный экран для зазгрузки файлов и переключений между функциональными окнами по сешн стейту.
 def main_screen():
     st.title("RAG-bot")
     st.sidebar.title("Меню")
@@ -262,6 +272,7 @@ def main_screen():
         st.rerun()
 
 
+# экран чата
 def chat_screen():
     st.title("Вопросы по документам")
     st.sidebar.title("Меню")
@@ -285,6 +296,93 @@ def chat_screen():
     user_input = st.chat_input("Задайте вопрос по своим pdf.")
     
     if butpha:
+        with st.sidebar.expander("Перефразированный ввод"):
+            # st.write(st.session_state.chat_history[-2]['content'])
+            st.write(rephrase(user_input=st.session_state.chat_history[-2]['content']))
+
+    # логика чата в последующих блоках идентична, нужно будет засунуть её в доп функцию
+    if user_input and st.session_state.conversational_rag_chain:
+        st.session_state.chat_history.append({"role": "user", "content": user_input})
+        with st.chat_message("user"):
+            st.write(user_input)
+
+        with st.chat_message("assistant"):
+            response_placeholder = st.empty()
+            full_response = ""
+            try:
+                for chunk in st.session_state.conversational_rag_chain.stream(
+                    {"input": user_input},
+                    config={
+                        "configurable": {"session_id": st.session_state.session_id}
+                    },
+                ):
+                    # st.write(chunk)
+                    if isinstance(chunk, dict):
+                        content = chunk.get('answer') or chunk.get('text') or chunk.get('content') or ''
+                        if content:
+                            full_response += content
+                            response_placeholder.markdown(full_response + "▌")
+                    elif isinstance(chunk, str):
+                        full_response += chunk
+                        response_placeholder.markdown(full_response + "▌")
+
+                if full_response:
+                    response_placeholder.markdown(full_response)
+                else:
+                    response_placeholder.markdown("Не могу сгенерировать ответ.")
+            except Exception as e:
+                st.error(f"Ошибка возникла во время генерации ответа: {str(e)}")
+                full_response = "Попробуйте ещё раз."
+                response_placeholder.markdown(full_response)
+
+        st.session_state.chat_history.append({"role": "assistant", "content": full_response})
+        # st.write(st.session_state.chat_history)
+
+    if st.button("Clear Chat History"):
+        st.session_state.chat_history = []
+        if st.session_state.session_id in st.session_state.history_store:
+            del st.session_state.history_store[st.session_state.session_id]
+        st.rerun()
+
+
+# экран архив
+def arxiv():
+    st.title("Вопросы по https://arxiv.org")
+    st.sidebar.title("Меню")
+    with st.sidebar:
+        button2 = st.button('Вернуться на главный экран')
+        query = st.text_input('Тематика статей(обязательно на английском)')
+        button3 = st.button('Начать отвечать по данной тематике')
+        butpha1 = st.button('Помоги с вопросом')
+        # st.write(st.session_state.meta)
+    if button2:
+        st.session_state.page = "main"
+        st.session_state.retriever = None
+        st.session_state.chat_history = []
+        st.session_state.conversational_rag_chain = None
+        st.session_state.history_store = None
+        st.session_state.session_id = None
+        st.rerun()
+
+    if query is not None and button3:
+        with st.spinner("Собираю статьи..."):
+                retriever, meta = extract_text_from_arxiv(query)
+                meta = [i for i in meta]
+                st.session_state.meta = meta
+                if retriever:
+                    st.session_state.retriever = retriever
+                    st.session_state.conversational_rag_chain, st.session_state.history_store = create_conversational_rag_chain(retriever)
+                    if st.session_state.conversational_rag_chain:
+                        st.success("Статьи загруженны в vectore_store!")
+    st.sidebar.info(st.session_state.meta)
+
+    for message in st.session_state.chat_history:
+        with st.chat_message(message["role"]):
+            st.write(message["content"])
+
+    user_input = st.chat_input("Задайте вопрос по статьям с arxiv.")
+
+    if butpha1:
         with st.sidebar.expander("Перефразированный ввод"):
             # st.write(st.session_state.chat_history[-2]['content'])
             st.write(rephrase(user_input=st.session_state.chat_history[-2]['content']))
@@ -333,92 +431,7 @@ def chat_screen():
         st.rerun()
 
 
-def arxiv():
-    st.title("Вопросы по https://arxiv.org")
-    st.sidebar.title("Меню")
-    with st.sidebar:
-        button2 = st.button('Вернуться на главный экран')
-        query = st.text_input('Тематика статей(обязательно на английском)')
-        button3 = st.button('Начать отвечать по данной тематике')
-        butpha1 = st.button('Помоги с вопросом')
-        # st.write(st.session_state.meta)
-    if button2:
-        st.session_state.page = "main"
-        st.session_state.retriever = None
-        st.session_state.chat_history = []
-        st.session_state.conversational_rag_chain = None
-        st.session_state.history_store = None
-        st.session_state.session_id = None
-        st.rerun()
-
-    if query is not None and button3:
-        with st.spinner("Собираю статьи..."):
-                retriever, meta = extract_text_from_arxiv(query)
-                meta = [i for i in meta]
-                st.session_state.meta = meta
-                if retriever:
-                    st.session_state.retriever = retriever
-                    st.session_state.conversational_rag_chain, st.session_state.history_store = create_conversational_rag_chain(retriever)
-                    if st.session_state.conversational_rag_chain:
-                        st.success("Статьи загруженны в vectore_store!")
-    st.sidebar.info(st.session_state.meta)
-
-    for message in st.session_state.chat_history:
-        with st.chat_message(message["role"]):
-            st.write(message["content"])
-
-    user_input = st.chat_input("Задайте вопрос по статьям с arxiv.")
-
-
-    if butpha1:
-        with st.sidebar.expander("Перефразированный ввод"):
-        # st.write(st.session_state.chat_history[-2]['content'])
-            st.write(rephrase(user_input=st.session_state.chat_history[-2]['content']))
-    
-
-    if user_input and st.session_state.conversational_rag_chain:
-        st.session_state.chat_history.append({"role": "user", "content": user_input})
-        with st.chat_message("user"):
-            st.write(user_input)
-        
-        with st.chat_message("assistant"):
-            response_placeholder = st.empty()
-            full_response = ""
-            try:
-                for chunk in st.session_state.conversational_rag_chain.stream(
-                    {"input": user_input},
-                    config={
-                        "configurable": {"session_id": st.session_state.session_id}
-                    },
-                ):
-                    # st.write(chunk)
-                    if isinstance(chunk, dict):
-                        content = chunk.get('answer') or chunk.get('text') or chunk.get('content') or ''
-                        if content:
-                            full_response += content
-                            response_placeholder.markdown(full_response + "▌")
-                    elif isinstance(chunk, str):
-                        full_response += chunk
-                        response_placeholder.markdown(full_response + "▌")
-                
-                if full_response:
-                    response_placeholder.markdown(full_response)
-                else:
-                    response_placeholder.markdown("Не могу сгенерировать ответ.")
-            except Exception as e:
-                st.error(f"Ошибка возникла во время генерации ответа: {str(e)}")
-                full_response = "Попробуйте ещё раз."
-                response_placeholder.markdown(full_response)
-        
-        st.session_state.chat_history.append({"role": "assistant", "content": full_response})
-        # st.write(st.session_state.chat_history)
-
-    if st.button("Clear Chat History"):
-        st.session_state.chat_history = []
-        if st.session_state.session_id in st.session_state.history_store:
-            del st.session_state.history_store[st.session_state.session_id]
-        st.rerun()
-
+# чат бд
 def bd():
     st.title("Вопросы по предзагруженной БД")
     
@@ -443,7 +456,7 @@ def bd():
 
     if butpha2:
         with st.sidebar.expander("Перефразированный ввод"):
-    # st.write(st.session_state.chat_history[-2]['content'])
+            # st.write(st.session_state.chat_history[-2]['content'])
             st.write(rephrase(user_input=st.session_state.chat_history[-2]['content']))
     
     if user_input and st.session_state.conversational_rag_chain:
