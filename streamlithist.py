@@ -36,11 +36,11 @@ load_dotenv()
 # функции в отдельный файл переносить не стал, т.к. кэшстримлита становится муторным.
 # Почти во всех функциях грузятся эмбеддинги\ллм.
 # Создаём модель не сбер
-
+credentials = os.getenv('credentials')
 
 @st.cache_resource
 def get_llm():
-    return GigaChat(credentials=os.getenv('credentials'), verify_ssl_certs=False)
+    return GigaChat(credentials = credentials, verify_ssl_certs=False)
 
 
 # Эмбеддинги 
@@ -94,7 +94,7 @@ def create_conversational_rag_chain(retriever):
     system_prompt = (
         "Твоя роль: Аналитик специализирующийся на быстром поиске информации в предоставленном контексте."
         "Краткая инструкция: Анализировать предложенный контекст и отвечать на вопросы, опираясь исключительно на информацию из этого контекста. Если информации в документе нет или не хватает, то так и пиши: информации недостаточно. Всегда отвечай на русском языке."
-        "Твоя цель: Обеспечить абсолютно точный ответ, полностью основанный на информации из предложенного контекста, без внесения внешних данных или предположений."
+        "Твоя цель: Обеспечить структурированный и развёрнуиый ответ, полностью основанный на информации из предложенного контекста, без внесения внешних данных или предположений."
         "Результат: Ответ должен быть четким и точным, содержать только информацию из предложенного контекста."
         "Ожидается, что ответ будет логически обоснованным и последовательным. Если ответа на вопрос нет в контексте, скажи об этом пользователю"
         "Ограничения: Отвечать можно только по контексту."
@@ -193,7 +193,7 @@ def extract_text_from_arxiv(query):
     return retriever_arxiv, meta
 
 
-# предзагрузка бд, очевидно не будет работать без самой бд - нужно создать.
+# предзагрузка бд, очевидно не будет работать без самой бд - нужно создать ноутбук creatingdb_kaggle.
 # Функционал ответа по файлам и архиву работает без этой функции
 # @st.cache_resource
 def prep_bd(session_id):
@@ -220,8 +220,11 @@ def rephrase(user_input):
 def main_screen():
     st.title("RAG-bot")
     st.sidebar.title("Меню")
+    uploaded_file = st.sidebar.file_uploader("Загрузите файлы", type="pdf", accept_multiple_files= True)
+    
+
     with st.sidebar:
-        uploaded_file = st.file_uploader("Загрузите файлы", type="pdf", accept_multiple_files= True)
+        # uploaded_file = st.file_uploader("Загрузите файлы", type="pdf", accept_multiple_files= True)
         button1 = st.button("Начать отвечать по документам")
         buttonarx = st.button("Q&A по arxiv.org")
         buttonbd = st.button('Отвечать по редзагруженной БД')
@@ -229,11 +232,15 @@ def main_screen():
     st.write("Выберите режим работы.")
 
     if uploaded_file is not None and button1:
+        names = []
+        for i in uploaded_file:
+            names.append(i.name)
         with st.spinner("Обрабатываю pdf..."):
             session_id = str(uuid.uuid4())
             retriever = extract_text_from_pdf(uploaded_file,session_id)
             if retriever:
                 st.session_state.retriever = retriever
+                st.session_state.pdf_name = names
                 st.session_state.conversational_rag_chain, st.session_state.history_store = create_conversational_rag_chain(retriever)
                 if st.session_state.conversational_rag_chain:
                     st.success("PDF загруженна")
@@ -276,10 +283,12 @@ def main_screen():
 def chat_screen():
     st.title("Вопросы по документам")
     st.sidebar.title("Меню")
-    # st.sidebar.info(f"PDF: {st.session_state.pdf_name}")
+    
     with st.sidebar:
         button2 = st.button('Вернуться на главный экран')
         butpha = st.button('Помоги с вопросом')
+        with st.expander("Загруженные документы"):
+            st.info(f"file {st.session_state.pdf_name}")
     if button2:
         st.session_state.page = "main"
         st.session_state.retriever = None
@@ -296,9 +305,12 @@ def chat_screen():
     user_input = st.chat_input("Задайте вопрос по своим pdf.")
     
     if butpha:
-        with st.sidebar.expander("Перефразированный ввод"):
-            # st.write(st.session_state.chat_history[-2]['content'])
-            st.write(rephrase(user_input=st.session_state.chat_history[-2]['content']))
+        try:
+            with st.sidebar.expander("Перефразированный ввод"):
+                # st.write(st.session_state.chat_history[-2]['content'])
+                st.write(rephrase(user_input=st.session_state.chat_history[-2]['content']))
+        except:
+            st.write('Как мне перефразировать пустоту?')
 
     # логика чата в последующих блоках идентична, нужно будет засунуть её в доп функцию
     if user_input and st.session_state.conversational_rag_chain:
